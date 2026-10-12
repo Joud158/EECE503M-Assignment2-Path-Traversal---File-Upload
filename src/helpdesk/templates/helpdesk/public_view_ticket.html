@@ -84,7 +84,7 @@
 
     {% if helpdesk_settings.HELPDESK_ENABLE_ATTACHMENTS %}
     {% for attachment in followup.followupattachment_set.all %}{% if forloop.first %}<div class='attachments'><ul>{% endif %}
-	    <li><a href='{{ attachment.file.url }}'>{{ attachment.filename }}</a> ({{ attachment.mime_type }}, {{ attachment.size|filesizeformat }})</li>
+	    <li><a href='{% url 'helpdesk:download_attachment' %}?path={{ attachment.file.name|urlencode }}&amp;email={{ mail|urlencode }}&amp;key={{ key|urlencode }}'>{{ attachment.filename }}</a> ({{ attachment.mime_type }}, {{ attachment.size|filesizeformat }})</li>
 	    {% if forloop.last %}</ul></div>{% endif %}
     {% endfor %}
     {% endif %}

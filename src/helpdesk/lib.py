@@ -184,7 +184,8 @@ def process_attachments(followup, attached_files):
                     attachments.append([filename, att.file])
 
     if errors:
-        raise ValidationError(list(errors))
+        from .validators import AttachmentValidationError
+        raise AttachmentValidationError("Attachment rejected.")
 
     return attachments
 

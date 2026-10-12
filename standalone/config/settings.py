@@ -93,6 +93,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
+    "helpdesk.upload_handlers.UploadErrorMiddleware",
 ]
 
 ROOT_URLCONF = "standalone.config.urls"
@@ -153,6 +154,20 @@ HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = (
 HELPDESK_VALIDATE_ATTACHMENT_TYPES = (
     os.environ.get("HELPDESK_VALIDATE_ATTACHMENT_TYPES", "True") == "True"
 )
+
+# Small allowlist: validated passive images and UTF-8 text only.
+HELPDESK_VALID_EXTENSIONS = [".png", ".jpg", ".jpeg", ".txt"]
+HELPDESK_MAX_UPLOAD_SIZE = 5 * 1024 * 1024
+HELPDESK_MAX_IMAGE_PIXELS = 20_000_000
+HELPDESK_ATTACHMENT_QUOTA = 50 * 1024 * 1024
+HELPDESK_TOTAL_ATTACHMENT_QUOTA = 500 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
+FILE_UPLOAD_HANDLERS = [
+    "helpdesk.upload_handlers.LimitedUploadHandler",
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
 
 # Should the Knowledgebase be enabled?
 HELPDESK_KB_ENABLED = os.environ.get("HELPDESK_KB_ENABLED", "True") == "True"
@@ -280,6 +295,11 @@ LOGGING = {
         },
     },
     "loggers": {
+        "helpdesk.uploads": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
         "django": {
             "handlers": ["console"],
             "level": "ERROR",  # Change to 'DEBUG' if you want to print all debug messages as well

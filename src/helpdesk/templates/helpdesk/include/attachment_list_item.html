@@ -1,6 +1,6 @@
 {% load i18n %}
 <li class="list-group-item ps-0">
-  <a class="d-block" href="{{ attachment.file.url }}" target="_blank">{{ attachment.filename|truncatechars:40 }}</a>
+  <a class="d-block" href="{% url 'helpdesk:download_attachment' %}?path={{ attachment.file.name|urlencode }}" target="_blank">{{ attachment.filename|truncatechars:40 }}</a>
   <small class="text-secondary">({{ attachment.mime_type }}, {{ attachment.size|filesizeformat }})</small>
   {% if attachment.mime_type == "text/html" %}
     {# The link above serves the original source inertly. This one renders it, sanitized. #}

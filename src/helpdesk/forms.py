@@ -338,9 +338,8 @@ class AbstractTicketForm(CustomFieldMixin, forms.Form):
             label=_("Attach File"),
             help_text=_(
                 "You can attach a file to this ticket. "
-                "Only file types such as plain text (.txt), "
-                "a document (.pdf, .docx, or .odt), "
-                "or screenshot (.png or .jpg) may be uploaded."
+                "Only UTF-8 text (.txt) and images (.png, .jpg, .jpeg) "
+                "up to 5 MiB may be uploaded."
             ),
             validators=[validate_file_extension],
         )

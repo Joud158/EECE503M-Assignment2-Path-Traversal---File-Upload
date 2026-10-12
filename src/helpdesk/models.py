@@ -10,6 +10,7 @@ models.py - Model (and hence database) definitions. This is the core of the
 from __future__ import annotations
 
 import datetime
+import logging
 import mimetypes
 import os
 import re
@@ -21,7 +22,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import models
+from django.db import connection, models, transaction
+from django.db.models import Sum
 from django.db.models import QuerySet
 from django.urls import reverse_lazy
 from django.utils import timezone
@@ -31,7 +33,6 @@ from django.utils.translation import gettext_lazy as _
 from markdown import markdown
 from markdown.extensions import Extension
 from rest_framework import serializers
-
 from helpdesk import settings as helpdesk_settings
 
 from .lib import (
@@ -41,7 +42,7 @@ from .lib import (
     format_time_spent,
 )
 from .templated_email import send_templated_mail
-from .validators import validate_file_extension
+from .validators import AttachmentValidationError, validate_file_extension
 
 User = get_user_model()
 
@@ -1247,11 +1248,85 @@ class Attachment(models.Model):
         return f"{self.filename}"
 
     def save(self, *args, **kwargs):
+        if self.file and not self.file._committed:
+            previous_name = (
+                type(self).objects.filter(pk=self.pk).values_list("file", flat=True).first()
+                if self.pk else None
+            )
+            # Model.save() does not run field validators automatically. Enforce
+            # this for API, email and admin uploads as well as the public form.
+            validate_file_extension(self.file)
+            # Strip image metadata and trailing non-pixel bytes before storage.
+            extension = os.path.splitext(self.file.name)[1].lower()
+            if extension in (".png", ".jpg", ".jpeg"):
+                from io import BytesIO
+                from django.core.files.base import ContentFile
+                from PIL import Image
+                original_name = self.file.name
+                output = BytesIO()
+                with Image.open(self.file) as image:
+                    pixels = image.convert("RGB") if extension != ".png" else image.copy()
+                    pixels.info.clear()
+                    pixels.save(output, format="PNG" if extension == ".png" else "JPEG")
+                    pixels.close()
+                self.file = ContentFile(output.getvalue(), name=original_name)
+                validate_file_extension(self.file)
+            self.size = self.get_size()
+            if not self.filename:
+                self.filename = os.path.basename(self.file.name)
+            from .validators import SUPPORTED_TYPES
+            self.mime_type = SUPPORTED_TYPES.get(
+                os.path.splitext(self.file.name)[1].lower(), "application/octet-stream"
+            )
+            with transaction.atomic():
+                # Serialize quota checks across all gunicorn workers. This lab
+                # uses PostgreSQL; one transaction lock covers every upload.
+                if connection.vendor == "postgresql":
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [503002])
+                total = sum(
+                    cls.objects.exclude(pk=self.pk if isinstance(self, cls) else None)
+                    .aggregate(total=Sum("size"))["total"] or 0
+                    for cls in (FollowUpAttachment, KBIAttachment)
+                )
+                if isinstance(self, FollowUpAttachment):
+                    owner = self.followup.user_id
+                    owned = FollowUpAttachment.objects.exclude(pk=self.pk)
+                    if owner:
+                        owned = owned.filter(followup__user_id=owner)
+                    else:
+                        owned = owned.filter(
+                            followup__user__isnull=True,
+                            followup__ticket__submitter_email__iexact=self.followup.ticket.submitter_email,
+                        )
+                    used = owned.aggregate(total=Sum("size"))["total"] or 0
+                else:
+                    owner = None
+                    used = KBIAttachment.objects.exclude(pk=self.pk).aggregate(total=Sum("size"))["total"] or 0
+                log = logging.getLogger("helpdesk.uploads")
+                if (used + self.size > getattr(settings, "HELPDESK_ATTACHMENT_QUOTA", 50 * 1024 * 1024)
+                        or total + self.size > getattr(settings, "HELPDESK_TOTAL_ATTACHMENT_QUOTA", 500 * 1024 * 1024)):
+                    log.info("upload rejected check=quota owner=%s size=%s type=%s", owner, self.size, self.mime_type)
+                    raise AttachmentValidationError(_("Attachment storage quota exceeded."))
+                try:
+                    result = super().save(*args, **kwargs)
+                except Exception:
+                    # Remove a newly stored file if the database write fails.
+                    if self.file._committed:
+                        self.file.storage.delete(self.file.name)
+                    raise
+                log.info("upload accepted stored=%s owner=%s size=%s type=%s",
+                         os.path.basename(self.file.name), owner, self.size, self.mime_type)
+                if previous_name and previous_name != self.file.name:
+                    storage = self.file.storage
+                    transaction.on_commit(lambda: storage.delete(previous_name))
+                return result
         if not self.size:
             self.size = self.get_size()
 
-        if not self.filename:
-            self.filename = self.get_filename()
+        # Store the original filename as a label, not the UUID path
+        if not self.filename and hasattr(self.file, 'name'):
+            self.filename = os.path.basename(self.file.name)
 
         if not self.mime_type:
             self.mime_type = (
@@ -1297,7 +1372,12 @@ class FollowUpAttachment(Attachment):
             and not os.path.exists(att_path)
         ):
             os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS)
-        return os.path.join(path, filename)
+
+        # Generate a random name, but keep the allowed extension
+        ext = os.path.splitext(filename)[1].lower()
+        stored_name = f"{uuid.uuid4().hex}{ext}"
+
+        return os.path.join(path, stored_name)
 
 
 class KBIAttachment(Attachment):
@@ -1315,7 +1395,25 @@ class KBIAttachment(Attachment):
             and not os.path.exists(att_path)
         ):
             os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS)
-        return os.path.join(path, filename)
+        ext = os.path.splitext(filename)[1].lower()
+        return os.path.join(path, f"{uuid.uuid4().hex}{ext}")
+
+
+def delete_attachment_file(sender, instance, **kwargs):
+    """Delete bytes after commit, including cascades and queryset deletions."""
+    if instance.file:
+        storage, name = instance.file.storage, instance.file.name
+        transaction.on_commit(lambda: storage.delete(name))
+
+
+models.signals.post_delete.connect(
+    delete_attachment_file, sender=FollowUpAttachment,
+    dispatch_uid="helpdesk_delete_followup_file",
+)
+models.signals.post_delete.connect(
+    delete_attachment_file, sender=KBIAttachment,
+    dispatch_uid="helpdesk_delete_kb_file",
+)
 
 
 class PreSetReply(models.Model):

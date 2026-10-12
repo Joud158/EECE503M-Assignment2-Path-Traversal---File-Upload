@@ -1455,17 +1455,49 @@ def debug_info(request):
     )
 
 
-@helpdesk_staff_member_required
 def download_attachment(request):
-    """Download an attachment by its stored path under the media directory."""
-    import os
+    """Authorize a registered attachment, then let nginx transfer its bytes."""
+    from pathlib import Path
+    from urllib.parse import quote
+    from django.utils.crypto import constant_time_compare
+    from django.utils.http import content_disposition_header
+    from helpdesk.models import KBIAttachment
 
-    rel = request.GET.get("path", "")
-    full = os.path.join(settings.MEDIA_ROOT, rel)
-    with open(full, "rb") as handle:
-        data = handle.read()
-    response = HttpResponse(data, content_type="application/octet-stream")
-    response["Content-Disposition"] = f'attachment; filename="{os.path.basename(rel)}"'
+    try:
+        root = Path(settings.MEDIA_ROOT).resolve()
+        target = (root / request.GET.get("path", "")).resolve(strict=True)
+        stored_path = target.relative_to(root).as_posix()
+        if not target.is_file():
+            raise ValueError
+    except (OSError, ValueError, RuntimeError):
+        raise Http404("Not found") from None
+
+    attachment = FollowUpAttachment.objects.select_related("followup__ticket").filter(file=stored_path).first()
+    if attachment:
+        ticket = attachment.followup.ticket
+        if is_helpdesk_staff(request.user):
+            allowed = HelpdeskUser(request.user).accessible_tickets().filter(pk=ticket.pk).exists()
+        else:
+            allowed = (
+                helpdesk_settings.HELPDESK_VIEW_A_TICKET_PUBLIC
+                and attachment.followup.public
+                and constant_time_compare(request.GET.get("key", ""), ticket.secret_key)
+                and request.GET.get("email", "").casefold() == ticket.submitter_email.casefold()
+            )
+    else:
+        attachment = KBIAttachment.objects.select_related("kbitem__category").filter(file=stored_path).first()
+        allowed = (
+            attachment is not None and is_helpdesk_staff(request.user)
+            and HelpdeskUser(request.user).can_access_kbcategory(attachment.kbitem.category)
+        )
+    if not allowed:
+        raise Http404("Not found")
+
+    response = HttpResponse(content_type="application/octet-stream")
+    response["X-Accel-Redirect"] = "/media/" + quote(stored_path, safe="/")
+    # Use a safe server-generated basename, never a raw uploaded filename.
+    response["Content-Disposition"] = content_disposition_header(True, target.name)
+    response["X-Content-Type-Options"] = "nosniff"
     return response
 
 

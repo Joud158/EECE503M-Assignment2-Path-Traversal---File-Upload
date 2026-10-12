@@ -181,7 +181,7 @@
                       <ul>
                         {% for attachment in followup.followupattachment_set.all %}
                           <li>
-                            <a href="{{ attachment.file.url }}" target="_blank">{{ attachment.filename }}</a>
+                            <a href="{% url 'helpdesk:download_attachment' %}?path={{ attachment.file.name|urlencode }}" target="_blank">{{ attachment.filename }}</a>
                             <small class="text-body-secondary">({{ attachment.mime_type }}, {{ attachment.size|filesizeformat }})</small>
                             {% if followup.user and request.user == followup.user %}
                               <a href="{% url 'helpdesk:attachment_del' ticket.id attachment.id %}"

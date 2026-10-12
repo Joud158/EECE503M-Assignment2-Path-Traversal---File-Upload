@@ -105,6 +105,7 @@ class FollowUpAttachmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = FollowUpAttachment
         fields = ("id", "followup", "file", "filename", "mime_type", "size")
+        read_only_fields = ("filename", "mime_type", "size")
 
 
 class FollowUpSerializer(serializers.ModelSerializer):
